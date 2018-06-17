@@ -1,0 +1,5 @@
+queue:
+- name: alarmQueue
+  rate: 1/s
+  bucket_size: 10
+  max_concurrent_requests: 5
