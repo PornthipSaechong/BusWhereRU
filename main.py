@@ -51,22 +51,22 @@ class Parser():
             seconds = (dt - now).total_seconds()
             minutes = int(seconds / 60)
             if minutes < 1:
-                return "Arr"
+                return "ARR"
             else:
                 return str(minutes)
         else:
             return 'NA'
 
-    def getPadding(self,text):
-        fixPad = 13
-        pad = ''.join([" " for i in range(fixPad - len(text))])
+    def getPadding(self,text,rowPad):
+        fixPad = 16
+        pad = ''.join([" " for i in range(fixPad - len(text) + (rowPad-len(text)))])
         return pad
 
     def parseBusStopInfo(self,data):
         if data["Services"]:
             busStopCode = data["BusStopCode"]
-            html = "Bus timings for bus stop: " + busStopCode
-            html += "\nService No.  Bus1         Bus2          Bus3" ## header
+            html = "Bus timings for bus stop: <i>" + busStopCode + "</i>"
+            html += "\n<b>Service No.   Bus1              Bus2               Bus3</b>" ## header
             now = datetime.datetime.now() + datetime.timedelta(hours=8)
             for s in data["Services"]:
                 bus1 = self.getDateTimeFromNow(s["NextBus"]["EstimatedArrival"],now) + " " +s["NextBus"]["Load"]
@@ -74,23 +74,22 @@ class Parser():
                 bus3 = self.getDateTimeFromNow(s["NextBus3"]["EstimatedArrival"],now) + " " +s["NextBus3"]["Load"]
                 html += "\n"
                 html += s["ServiceNo"]
-                html += self.getPadding(s["ServiceNo"])
+                html += self.getPadding(s["ServiceNo"],4)
                 html += bus1
-                html += self.getPadding(bus1)
+                html += self.getPadding(bus1,7)
                 html += bus2
-                html += self.getPadding(bus2)
+                html += self.getPadding(bus2,7)
                 html += bus3
-                html += self.getPadding(bus3)
+                html += self.getPadding(bus3,7)
             html += "\n SEA (for Seats Available) SDA (for Standing Available) LSD (for Limited Standing)"
-            return html
+            return True, html
         else:
-            return "<b>Bus stop not found</b> Please provide another stop code."
+            return False, "<b>Bus stop not found</b> Please provide another stop code."
 
     def parseDataAsButton(self,data):
         validArray = []
         for d in range(len(data)):
             validArray.append({"text":data[d], "callback_data": data[d]})
-        
         return validArray
 
     def parseDataAsButtonDict(self,data):
@@ -195,11 +194,20 @@ class Parser():
     def getLocationData(self,data):
         location_data = {}
         for s in data["Services"]:
-            location_data[s["ServiceNo"]] = {"location": {}}
-            location_data[s["ServiceNo"]]["location"]["latitude"] = s["NextBus"]["Latitude"]
-            location_data[s["ServiceNo"]]["location"]["longitude"] = s["NextBus"]["Longitude"]
+            logging.info(s["ServiceNo"])
+            if "NextBus" in s.keys():
+                location_data[s["ServiceNo"]] = {"location": {}}
+                location_data[s["ServiceNo"]]["location"]["latitude"] = s["NextBus"]["Latitude"]
+                location_data[s["ServiceNo"]]["location"]["longitude"] = s["NextBus"]["Longitude"]
 
         return location_data
+
+    def parseButtonRow(self,data):
+        def divideChunks(arr,n):
+            for i in range(0,len(arr),n):
+                yield arr[i:i+n]
+        chunks = list(divideChunks(data,8))
+        return chunks
 
 
 class Alarm(Handler):
@@ -233,19 +241,22 @@ def callDataMall(busStop):
     contents = json.loads(contents)
     return contents
 
-def sendMessage(sendType, chat_id, text, reply_markup, obj_res):
+def sendMessage(sendType, chat_id, text, reply_markup, obj_res, parse_mode):
     func = "sendMessage"
 
     if sendType == "text":
         reply = {"chat_id":chat_id,"text":text, "parse_mode":"HTML"}
         
     elif sendType == "button":
-        reply = {"chat_id":chat_id, "text":text, "reply_markup": json.dumps({"inline_keyboard":[reply_markup]})}
+        reply = {"chat_id":chat_id, "text":text, "reply_markup": json.dumps({"inline_keyboard":reply_markup})}
 
     elif sendType == "location":
         func = "sendLocation"
         obj_res["chat_id"] = chat_id
         reply = obj_res
+
+    if parse_mode:
+        reply["parse_mode"] = parse_mode
     # encode and send to telegram chat
     reply = urllib.urlencode(reply)
 
@@ -272,6 +283,7 @@ class BusStop(Handler):
             text_msg = None
             text = None
             obj_res = None
+            parse_mode = None
 
             request = json.loads(self.request.body)
             logging.info(request)
@@ -324,7 +336,7 @@ class BusStop(Handler):
                         else:
                             text = "Your saved bus stop codes:"
                             sendType = "button"
-                            reply_markup = parser.parseDataAsButton(user.busStopList)
+                            reply_markup = [parser.parseDataAsButton(user.busStopList)]
                     else:
                         text = "You did not save any bus stop."
 
@@ -357,7 +369,7 @@ class BusStop(Handler):
                             else:
                                 text = "Choose which bus stop code to remove:"
                                 sendType = "button"
-                                reply_markup = parser.parseDataAsButton(user.busStopList)
+                                reply_markup = [parser.parseDataAsButton(user.busStopList)]
                         else:
                             text = "You did not save any bus stop."
 
@@ -369,7 +381,7 @@ class BusStop(Handler):
                         memcache.set("{}".format(chat_id),command)
                         text = "Choose available buses:"
                         sendType = "button"
-                        reply_markup = parser.parseDataAsButton(location_data.keys())
+                        reply_markup = parser.parseButtonRow(parser.parseDataAsButton(location_data.keys()))
                     else:
                         text = "Invalid command"
 
@@ -385,12 +397,14 @@ class BusStop(Handler):
 
                     if command == "stop" or command == "list":      
                         contents = callDataMall(text_msg)
-                        text = parser.parseBusStopInfo(contents)
+                        found, text = parser.parseBusStopInfo(contents)
+                        parse_mode = "html"
                         sendType = "button"
-                        reply_markup = parser.parseDataAsButtonDict({"/location": "SHOW LOCATION"})
-                        ## save location data for when user click on show location
-                        location_data = parser.getLocationData(contents)
-                        memcache.set('{}_location'.format(chat_id),location_data)
+                        if found:
+                            reply_markup = [parser.parseDataAsButtonDict({"/location": "SHOW LOCATION"})]
+                            ## save location data for when user click on show location
+                            location_data = parser.getLocationData(contents)
+                            memcache.set('{}_location'.format(chat_id),location_data)
                         
                     if command == "save":
                         # save bus stop to user
@@ -400,7 +414,7 @@ class BusStop(Handler):
                             if text_msg in user.busStopList:
                                 text = "Seems like you have already saved this bus stop code"
                                 sendType = "button"
-                                reply_markup = parser.parseDataAsButton(user.busStopList)
+                                reply_markup = [parser.parseDataAsButton(user.busStopList)]
                             else:
                                 ## check if bus stop code to add is valid
                                 contents = callDataMall(text_msg)
@@ -410,7 +424,7 @@ class BusStop(Handler):
                                     user.put()
                                     text = "Successfully saved bus stop"
                                     sendType = "button"
-                                    reply_markup = parser.parseDataAsButton(user.busStopList)
+                                    reply_markup = [parser.parseDataAsButton(user.busStopList)]
                                 else:
                                     text = "Invalid bus stop code"
                         else:
@@ -423,7 +437,7 @@ class BusStop(Handler):
                                 user.put()
                                 text = "Successfully saved bus stop."
                                 sendType = "button"
-                                reply_markup = parser.parseDataAsButton(user.busStopList)
+                                reply_markup = [parser.parseDataAsButton(user.busStopList)]
                             else:
                                 text = "Invalid bus stop code"
 
@@ -439,7 +453,7 @@ class BusStop(Handler):
                                     text += " No bus stop available."
                                 else:
                                     sendType = "button"
-                                    reply_markup = parser.parseDataAsButton(user.busStopList)
+                                    reply_markup = [parser.parseDataAsButton(user.busStopList)]
                             else:
                                 text += "You did not save any bus stop."
                         except Exception,e:
@@ -489,7 +503,7 @@ class BusStop(Handler):
                         obj_res = location_data[str(text_msg)]["location"]
 
             if text:
-                sendMessage(sendType, chat_id, text, reply_markup, obj_res)
+                sendMessage(sendType, chat_id, text, reply_markup, obj_res, parse_mode)
 
             self.response.out.write("Response sent")
             return
